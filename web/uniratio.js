@@ -175,6 +175,7 @@ app.registerExtension({
 
             const summary = this.addWidget("text", "Resolved", "Loading…", () => {}, { serialize: false });
             summary.disabled = true;
+            let updateDisplay;
             const choose = this.addWidget("button", "Resolution", "Choose…", async () => {
                 await openPicker({ selection: selection.value, manualWidth: manualWidth.value, manualHeight: manualHeight.value }, (value, catalog, width, height) => {
                     selection.value = value;
@@ -182,30 +183,40 @@ app.registerExtension({
                         manualWidth.value = width;
                         manualHeight.value = height;
                     }
-                    const description = describe(value, catalog, upscale.value, manualWidth.value, manualHeight.value);
-                    summary.value = `${description.label} · ${description.detail}`;
-                    this.setDirtyCanvas(true, true);
+                    updateDisplay?.(catalog);
                 });
             });
 
             getCatalog().then((catalog) => {
-                const updateSummary = () => {
-                    const description = describe(selection.value, catalog, upscale.value, manualWidth.value, manualHeight.value);
+                updateDisplay = (currentCatalog = catalog) => {
+                    const description = describe(selection.value, currentCatalog, upscale.value, manualWidth.value, manualHeight.value);
                     summary.value = `${description.label} · ${description.detail}`;
+                    // Some ComfyUI frontends do not draw disabled text-widget values.
+                    // Mirror the active resolution on the button so it is always visible.
+                    choose.label = `${description.label} · ${description.detail}`;
+                    choose.name = choose.label;
                     this.setDirtyCanvas(true, true);
                 };
                 const originalUpscaleCallback = upscale.callback;
                 upscale.callback = function () {
                     originalUpscaleCallback?.apply(this, arguments);
-                    updateSummary();
+                    updateDisplay();
                 };
-                updateSummary();
-                choose.label = "Change resolution";
+                updateDisplay();
                 hidePresetWidgets();
             }).catch((error) => {
                 summary.value = "Catalog unavailable — use saved preset";
                 console.error("[UniRatio]", error);
             });
+
+            // Saved widget values are restored after onNodeCreated. Refresh after
+            // configuration so loaded presets and manual dimensions are not stale.
+            const originalOnConfigure = this.onConfigure;
+            this.onConfigure = function () {
+                const configured = originalOnConfigure?.apply(this, arguments);
+                updateDisplay?.();
+                return configured;
+            };
 
             this.setSize([Math.max(this.size[0], 300), this.computeSize()[1]]);
             return result;
