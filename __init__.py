@@ -2,7 +2,7 @@ from typing_extensions import override
 
 from comfy_api.latest import ComfyExtension, io
 
-from .nodes import UniResizeNode, UniRatioNode
+from .nodes import UniResizeNode, UniRatioNode, UniLoadNode
 
 
 WEB_DIRECTORY = "./web"
@@ -11,7 +11,7 @@ WEB_DIRECTORY = "./web"
 class UniResizeExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
-        return [UniResizeNode, UniRatioNode]
+        return [UniResizeNode, UniRatioNode, UniLoadNode]
 
 
 async def comfy_entrypoint() -> UniResizeExtension:
