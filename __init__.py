@@ -5,9 +5,6 @@ from comfy_api.latest import ComfyExtension, io
 from .nodes import UniResizeNode, UniRatioNode, UniLoadNode
 
 
-WEB_DIRECTORY = "./web"
-
-
 class UniResizeExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:

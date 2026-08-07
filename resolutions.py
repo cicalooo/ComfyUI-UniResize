@@ -1,113 +1,172 @@
+"""Aspect ratio + a sizing rule -> width/height.
+
+The sizing vocabulary is ComfyUI's own ``ResizeType`` from
+``comfy_extras/nodes_post_processing.py``, so UniRatio offers the same choices
+as UniResize and UniLoad: pin the total pixels, the longer edge, the shorter
+edge, one axis, both axes, or another image's size. Megapixels is one option
+among those, not the only way in.
+
+The difference is that UniRatio has no image to measure, so the aspect ratio
+supplies whatever the chosen rule leaves undetermined.
+"""
+
 from __future__ import annotations
 
-import json
 import math
-from pathlib import Path
-from typing import Any
 
 from nodes import MAX_RESOLUTION
 
+ASPECT_RATIOS = {
+    "1:1": (1, 1),
+    "4:3": (4, 3),
+    "3:4": (3, 4),
+    "3:2": (3, 2),
+    "2:3": (2, 3),
+    "16:9": (16, 9),
+    "9:16": (9, 16),
+    "21:9": (21, 9),
+    "9:21": (9, 21),
+}
 
-CATALOG_PATH = Path(__file__).with_name("web") / "resolution_catalog.json"
+RATIO_NAMES = list(ASPECT_RATIOS)
+MULTIPLES = ["disabled", "8", "16", "32", "64"]
+
+# Modes that determine both edges themselves; aspect_ratio plays no part.
+EXPLICIT_MODES = {"scale dimensions", "match size", "scale by multiplier"}
 
 
-def load_catalog() -> dict[str, Any]:
-    with CATALOG_PATH.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
-
-
-CATALOG = load_catalog()
-PROFILES = {profile["id"]: profile for profile in CATALOG["profiles"]}
-RATIOS = {ratio["id"]: ratio for ratio in CATALOG["ratios"]}
-
-
-def selection_ids() -> list[str]:
-    return ["manual"] + [
-        f'{profile["id"]}:{ratio_id}'
-        for profile in CATALOG["profiles"]
-        for ratio_id in profile["ratios"]
-    ]
+def ratio_of(ratio_name: str) -> float:
+    try:
+        ratio_w, ratio_h = ASPECT_RATIOS[ratio_name]
+    except KeyError:
+        raise ValueError(
+            f"Unknown aspect ratio {ratio_name!r}; expected one of "
+            f"{', '.join(RATIO_NAMES)}."
+        ) from None
+    return ratio_w / ratio_h
 
 
 def _snap(value: float, multiple: int) -> int:
+    if multiple <= 1:
+        return max(1, int(round(value)))
     return max(multiple, int(round(value / multiple)) * multiple)
 
 
-def _translated_dimensions(profile: dict[str, Any], ratio_id: str) -> tuple[int, int]:
-    ratio = RATIOS[ratio_id]["width"] / RATIOS[ratio_id]["height"]
-    area = int(profile["target_area"])
-    multiple = int(profile["multiple"])
-    ideal_width = math.sqrt(area * ratio)
-    ideal_height = math.sqrt(area / ratio)
+def _best_area_fit(ratio: float, area: float, multiple: int) -> tuple[int, int]:
+    """Grid-aligned pair closest to both the target area and the target ratio.
 
-    # Search around the independently rounded pair. This keeps both pixel-area
-    # and aspect-ratio error low instead of allowing one rounding direction to
-    # dominate narrow or cinematic formats.
-    base_width = _snap(ideal_width, multiple)
-    base_height = _snap(ideal_height, multiple)
-    candidates: list[tuple[float, int, int]] = []
+    Rounding each edge independently lets one direction dominate on narrow or
+    cinematic formats, so the neighbourhood around the naive pair is scored on
+    combined area and aspect error.
+    """
+    base_width = _snap(math.sqrt(area * ratio), multiple)
+    base_height = _snap(math.sqrt(area / ratio), multiple)
+    step = max(1, multiple)
+    best = None
     for width_step in range(-2, 3):
         for height_step in range(-2, 3):
-            width = base_width + width_step * multiple
-            height = base_height + height_step * multiple
-            if width < multiple or height < multiple:
+            width = base_width + width_step * step
+            height = base_height + height_step * step
+            if width < step or height < step:
                 continue
-            area_error = abs((width * height) - area) / area
-            ratio_error = abs((width / height) - ratio) / ratio
-            candidates.append((area_error + ratio_error, width, height))
-    _, width, height = min(candidates)
-    return width, height
+            if width > MAX_RESOLUTION or height > MAX_RESOLUTION:
+                continue
+            error = (abs(width * height - area) / area
+                     + abs(width / height - ratio) / ratio)
+            if best is None or error < best[0]:
+                best = (error, width, height)
+    if best is None:
+        raise ValueError(
+            f"No valid size for area {area:.0f} on a {multiple}px grid within "
+            f"MAX_RESOLUTION ({MAX_RESOLUTION})."
+        )
+    return best[1], best[2]
 
 
-def resolve_selection(selection: str) -> tuple[int, int]:
-    try:
-        profile_id, ratio_id = selection.split(":", 1)
-        profile = PROFILES[profile_id]
-    except (ValueError, KeyError) as error:
-        raise ValueError(f"Unknown UniRatio selection: {selection!r}") from error
-
-    if ratio_id not in profile["ratios"] or ratio_id not in RATIOS:
-        raise ValueError(f"Ratio {ratio_id!r} is not available for {profile['name']}")
-
-    exact = profile.get("exact", {}).get(ratio_id)
-    if exact:
-        width, height = map(int, exact)
-    else:
-        width, height = _translated_dimensions(profile, ratio_id)
-
-    multiple = int(profile["multiple"])
-    if width % multiple or height % multiple:
-        raise ValueError(f"Resolved dimensions must be divisible by {multiple}")
+def _validate(width: int, height: int) -> tuple[int, int]:
+    if width < 1 or height < 1:
+        raise ValueError("Resolved dimensions must be positive.")
     if width > MAX_RESOLUTION or height > MAX_RESOLUTION:
-        raise ValueError(f"Resolved dimensions exceed ComfyUI MAX_RESOLUTION ({MAX_RESOLUTION})")
+        raise ValueError(
+            f"Resolved dimensions {width}x{height} exceed ComfyUI "
+            f"MAX_RESOLUTION ({MAX_RESOLUTION})."
+        )
     return width, height
 
 
-def resolve_dimensions(
-    selection: str,
-    upscale: float = 1.0,
-    manual_width: int = 1024,
-    manual_height: int = 1024,
+def solve(
+    mode: str,
+    ratio_name: str,
+    multiple: int,
+    *,
+    megapixels: float = 1.0,
+    longer_size: int = 1024,
+    shorter_size: int = 768,
+    width: int = 1024,
+    height: int = 1024,
+    multiplier: float = 1.0,
+    reference: tuple[int, int] | None = None,
 ) -> tuple[int, int]:
-    if not 0.01 <= upscale <= 8.0:
-        raise ValueError("Upscale must be between 0.01 and 8.0")
+    """Resolve one sizing rule to a concrete, grid-aligned width/height.
 
-    if selection == "manual":
-        base_width, base_height = int(manual_width), int(manual_height)
-        multiple = 1
-    else:
-        base_width, base_height = resolve_selection(selection)
-        profile_id, _ = selection.split(":", 1)
-        multiple = int(PROFILES[profile_id]["multiple"])
+    Edge-pinned rules keep the number you asked for: the pinned edge is snapped
+    to the grid and the other edge is derived from the ratio. Only
+    ``scale total pixels`` trades both edges off against each other, because
+    only there is the target a product rather than a length.
+    """
+    if mode in EXPLICIT_MODES:
+        if mode == "scale dimensions":
+            target_w, target_h = float(width), float(height)
+        else:
+            if reference is None:
+                raise ValueError(
+                    f"'{mode}' needs a reference image or mask connected to "
+                    "the 'match' input."
+                )
+            target_w, target_h = float(reference[0]), float(reference[1])
+            if mode == "scale by multiplier":
+                if multiplier <= 0.0:
+                    raise ValueError("multiplier must be positive.")
+                target_w *= multiplier
+                target_h *= multiplier
+        return _validate(_snap(target_w, multiple), _snap(target_h, multiple))
 
-    width = _snap(base_width * upscale, multiple)
-    height = _snap(base_height * upscale, multiple)
-    if width > MAX_RESOLUTION or height > MAX_RESOLUTION:
-        raise ValueError(f"Scaled dimensions exceed ComfyUI MAX_RESOLUTION ({MAX_RESOLUTION})")
-    return width, height
+    ratio = ratio_of(ratio_name)
+
+    if mode == "scale total pixels":
+        if megapixels <= 0.0:
+            raise ValueError("megapixels must be positive.")
+        return _validate(*_best_area_fit(ratio, megapixels * 1_000_000, multiple))
+
+    if mode == "scale longer dimension":
+        if longer_size < 1:
+            raise ValueError("longer_size must be positive.")
+        pinned = _snap(longer_size, multiple)
+        other = _snap(pinned / ratio if ratio >= 1.0 else pinned * ratio, multiple)
+        return _validate(*((pinned, other) if ratio >= 1.0 else (other, pinned)))
+
+    if mode == "scale shorter dimension":
+        if shorter_size < 1:
+            raise ValueError("shorter_size must be positive.")
+        pinned = _snap(shorter_size, multiple)
+        other = _snap(pinned * ratio if ratio >= 1.0 else pinned / ratio, multiple)
+        return _validate(*((other, pinned) if ratio >= 1.0 else (pinned, other)))
+
+    if mode == "scale width":
+        if width < 1:
+            raise ValueError("width must be positive.")
+        pinned = _snap(width, multiple)
+        return _validate(pinned, _snap(pinned / ratio, multiple))
+
+    if mode == "scale height":
+        if height < 1:
+            raise ValueError("height must be positive.")
+        pinned = _snap(height, multiple)
+        return _validate(_snap(pinned * ratio, multiple), pinned)
+
+    raise ValueError(f"Unsupported sizing mode: {mode!r}")
 
 
-def selection_summary(selection: str) -> str:
-    profile_id, ratio_id = selection.split(":", 1)
-    width, height = resolve_selection(selection)
-    return f"{PROFILES[profile_id]['name']} · {RATIOS[ratio_id]['label']} · {width}×{height}"
+def dimensions_for(ratio_name: str, megapixels: float, multiple: int) -> tuple[int, int]:
+    """Back-compatible shorthand for the ``scale total pixels`` rule."""
+    return solve("scale total pixels", ratio_name, multiple, megapixels=megapixels)

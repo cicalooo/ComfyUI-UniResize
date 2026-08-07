@@ -1,55 +1,111 @@
 # ComfyUI-UniResize
 
-Three focused ComfyUI utilities for loading and resizing media and controlling generation dimensions.
+Three focused ComfyUI utilities for loading and resizing images and controlling
+generation dimensions. All three share one control set and one implementation;
+the resize maths is ComfyUI's own, from `comfy_extras/nodes_post_processing.py`.
+
+No dependencies, no custom JavaScript, no catalog files.
+
+## The shared control set
+
+`UniLoad` and `UniResize` take the same three controls:
+
+- **resize_type** — custom width/height, scale by multiplier, longer/shorter
+  edge, width only, height only, total megapixels, match another image's size,
+  and scale to multiple. `UniLoad` adds `disabled` (its default), because
+  loading is the point of that node and resizing is opt-in.
+- **crop** — `disabled` stretches, `center` crops to preserve aspect ratio.
+  Shown only for the modes that pin both dimensions.
+- **scale_method** — interpolation, default **bicubic**.
+- **adhere_to_multiple** — center-crop the result to dimensions divisible by
+  8, 16, 32, or 64. Default **32**.
 
 ## Nodes
 
-### UniResize (Image/Mask)
-
-An extension of ComfyUI's native Resize Image/Mask node that also outputs the actual resulting width and height. It supports images and masks, every native resize mode, and the native interpolation methods. Optionally, its final output can be center-cropped to dimensions divisible by 8, 16, 32, or 64.
-
-Outputs: resized image/mask, width, and height.
-
-Defaults: `scale_method` is **bicubic** and `adhere_to_multiple` is **32**. Dimension fields default to 1024.
-
 ### UniLoad (Load + Resize)
 
-Load Image and UniResize combined into one node, so the common "load a reference, then fit it to the target resolution" step costs one node instead of two.
+Load Image and UniResize in one node, so "load a reference, fit it to the target
+resolution" costs one node instead of two. Same picker and upload button as the
+native Load Image.
 
-It carries the same image picker and upload button as the native Load Image node, followed by the full UniResize control set:
+Outputs: **image, mask, width, height**.
 
-- **resize_type** — `disabled` (default) plus every UniResize mode: custom width/height, scale by multiplier, longer/shorter edge, width only, height only, total megapixels, match another image's size, and scale to multiple.
-- **crop** — `disabled` stretches, `center` crops to preserve aspect ratio. Shown for the modes where both dimensions are pinned (custom w/h and match size).
-- **scale_method** — interpolation algorithm, default **bicubic**.
-- **adhere_to_multiple** — center-crop the result to dimensions divisible by 8, 16, 32, or 64, default **32**.
+The mask goes through the exact same geometry as the image, so it stays aligned
+after any resize. When the source has no alpha channel, `LoadImage` returns a
+64×64 placeholder mask; UniLoad expands it to the image's size first so the two
+cannot drift apart. With `resize_type` and `adhere_to_multiple` both `disabled`,
+the node returns exactly what native Load Image would.
 
-Outputs: image, mask, width, and height.
+### UniResize (Image)
 
-The mask goes through the exact same geometry as the image, so it stays aligned after any resize. When the source file has no alpha channel, Load Image returns a 64×64 placeholder mask; UniLoad expands that to the image's size before resizing so the two never drift apart. With `resize_type` set to `disabled` and `adhere_to_multiple` set to `disabled`, the node returns exactly what the native Load Image node would.
+The same controls without the loading, for an image already in the graph.
+
+Outputs: **image, width, height**.
+
+Images only. To resize a mask, convert with the native `MaskToImage` /
+`ImageToMask`, or run it through `UniLoad`.
 
 ### UniRatio (Width/Height)
 
-A compact, model-aware ratio and resolution controller with exactly two outputs: width and height.
+A resolution source with no image attached. It offers the **same sizing rules**
+as the resize nodes — a pixel budget is one option among eight, not the only way
+in.
 
-The node shows a short resolution summary, a visible **upscale** multiplier, and a single **Change resolution** button. The button opens a searchable, nested browser grouped into General, Image, and Video profiles, so adding presets does not make the graph node or a dropdown menu enormous. Manual width and height entry lives at the top of this browser.
+| Widget | Meaning |
+|---|---|
+| `aspect_ratio` | `1:1`, `4:3`, `3:4`, `3:2`, `2:3`, `16:9`, `9:16`, `21:9`, `9:21` |
+| `size_by` | which rule fixes the size (below) |
+| `multiple` | grid both edges land on: 8, 16, 32, 64, or `disabled` for exact pixels |
 
-Included profile families:
+Portrait ratios are listed separately, so there is no orientation switch.
 
-- General 512 and 1-megapixel translation
-- Stable Diffusion 1.x/2.x, SDXL, and SD3/3.5
-- FLUX and Qwen Image
-- Wan 480p and 720p
-- HunyuanVideo
-- LTX-Video
-- CogVideoX
-- Mochi
+`size_by` uses core's own `ResizeType` names, so the dropdown reads the same as
+in UniResize and UniLoad:
 
-Known/native pairs are returned exactly. Other available ratios are calculated from the profile's target pixel area and snapped to its required spatial multiple. The optional 0.01–8.0 upscale multiplier is applied afterward and preset results remain aligned to the selected model profile. Manual dimensions remain pixel-exact. The Python backend performs and validates the calculation; JavaScript only supplies the compact browser.
+| Rule | You give | Aspect ratio supplies |
+|---|---|---|
+| `scale total pixels` | megapixels | both edges |
+| `scale longer dimension` | longer_size | the shorter edge |
+| `scale shorter dimension` | shorter_size | the longer edge |
+| `scale width` | width | the height |
+| `scale height` | height | the width |
+| `scale dimensions` | width + height | nothing — ignored |
+| `match size` | a reference image/mask | nothing — ignored |
+| `scale by multiplier` | a reference + multiplier | nothing — ignored |
 
-The saved workflow stores a stable key such as `wan_720:16-9`, rather than a display label. If the frontend extension cannot load, the standard selection widget remains a functional fallback.
+`scale to multiple` is not in this list because here it is the always-on
+`multiple` widget rather than a way to choose a size.
+
+**Edge-pinned rules keep your number.** `scale width 1344` at `16:9` gives
+exactly 1344×768. Only `scale total pixels` trades both edges off against each
+other, because only there is the target a product rather than a length —
+rounding each edge independently lets one direction dominate on cinematic
+formats, so the neighbourhood around the naive pair is scored on combined area
+and aspect error. `16:9` at 1.0 MP on a 32px grid gives 1312×736: 0.97 MP,
+aspect error under 0.3%.
+
+There are no model profiles, because a model profile was only ever a target
+area or a target edge:
+
+| Target | rule |
+|---|---|
+| SD 1.5 era | `scale total pixels` 0.26, grid 8 |
+| SDXL, SD3, FLUX, Qwen Image | `scale total pixels` 1.0, grid 8 or 64 |
+| Wan / video 480p | `scale shorter dimension` 480, grid 32 |
+| Wan / video 720p | `scale shorter dimension` 720, grid 32 |
+| MiniMax H3 | `scale width` 1344 at 16:9, grid 32 |
+
+### Driving a generator's resolution
+
+`UniRatio` is meant to be wired into whatever sizes your generation. For
+MiniMax H3, `ComfyUI-EZ-H3`'s `EZ H3 Prompt` and `EZ H3 Shape` expose link-only
+`width`/`height` inputs that override their `aspect_ratio` widget:
+
+```
+UniRatio ──width──►  EZ H3 Prompt  ──prompt/width/height/length──► MiniMax H3
+         └─height──►
+```
 
 ## Install
 
-Clone or copy this folder into `ComfyUI/custom_nodes/` and restart ComfyUI. There are no dependencies beyond ComfyUI itself.
-
-UniResize and UniLoad reuse the core resize helpers from `comfy_extras/nodes_post_processing.py`, and UniLoad reuses the native `LoadImage` loader, so their results stay identical to the native nodes.
+Copy this folder into `ComfyUI/custom_nodes/` and restart ComfyUI.

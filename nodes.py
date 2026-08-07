@@ -19,7 +19,7 @@ from comfy_extras.nodes_post_processing import (
     scale_to_multiple_cover,
 )
 
-from .resolutions import selection_ids, resolve_dimensions
+from .resolutions import EXPLICIT_MODES, MULTIPLES, RATIO_NAMES, solve
 
 
 SCALE_METHODS = ["nearest-exact", "bilinear", "area", "bicubic", "lanczos"]
@@ -88,6 +88,45 @@ def resize_options(include_disabled: bool = False, include_match: bool = True) -
         io.Int.Input("multiple", default=32, min=1, max=MAX_RESOLUTION, step=1, tooltip="Resize so width and height are divisible by this number. Useful for latent alignment (e.g., 8 or 64)."),
     ]))
     return options
+
+
+def size_by_options() -> list[io.DynamicCombo.Option]:
+    """UniRatio's sizing rules: the same vocabulary, minus the input image.
+
+    Every entry is a ``ResizeType`` value so the dropdown reads identically to
+    UniResize and UniLoad. ``scale to multiple`` is absent because it is the
+    always-on ``multiple`` widget here rather than a way to choose a size.
+    """
+    match_input = io.MultiType.Input(
+        "match", [io.Image, io.Mask],
+        tooltip="Reference to take dimensions from. Aspect ratio is ignored.",
+    )
+    return [
+        io.DynamicCombo.Option(ResizeType.SCALE_TOTAL_PIXELS, [
+            io.Float.Input("megapixels", default=1.0, min=0.01, max=16.0, step=0.01, tooltip="Total pixel budget. 1.0 is roughly 1024x1024; 0.26 is roughly 512x512."),
+        ]),
+        io.DynamicCombo.Option(ResizeType.SCALE_LONGER_DIMENSION, [
+            io.Int.Input("longer_size", default=1024, min=1, max=MAX_RESOLUTION, step=1, tooltip="The longer edge lands on exactly this (after grid snapping); the shorter edge follows the aspect ratio."),
+        ]),
+        io.DynamicCombo.Option(ResizeType.SCALE_SHORTER_DIMENSION, [
+            io.Int.Input("shorter_size", default=768, min=1, max=MAX_RESOLUTION, step=1, tooltip="The shorter edge lands on exactly this (after grid snapping); the longer edge follows the aspect ratio."),
+        ]),
+        io.DynamicCombo.Option(ResizeType.SCALE_WIDTH, [
+            io.Int.Input("width", default=1024, min=1, max=MAX_RESOLUTION, step=1, tooltip="Width is pinned; height follows the aspect ratio."),
+        ]),
+        io.DynamicCombo.Option(ResizeType.SCALE_HEIGHT, [
+            io.Int.Input("height", default=1024, min=1, max=MAX_RESOLUTION, step=1, tooltip="Height is pinned; width follows the aspect ratio."),
+        ]),
+        io.DynamicCombo.Option(ResizeType.SCALE_DIMENSIONS, [
+            io.Int.Input("width", default=1344, min=1, max=MAX_RESOLUTION, step=1, tooltip="Exact width. Aspect ratio is ignored."),
+            io.Int.Input("height", default=768, min=1, max=MAX_RESOLUTION, step=1, tooltip="Exact height. Aspect ratio is ignored."),
+        ]),
+        io.DynamicCombo.Option(ResizeType.MATCH_SIZE, [match_input]),
+        io.DynamicCombo.Option(ResizeType.SCALE_BY, [
+            match_input,
+            io.Float.Input("multiplier", default=1.0, min=0.01, max=8.0, step=0.01, tooltip="Scale factor applied to the reference's size."),
+        ]),
+    ]
 
 
 def scale_method_input() -> io.Combo.Input:
@@ -159,17 +198,22 @@ def get_dimensions(output: torch.Tensor) -> tuple[int, int]:
 
 
 class UniResizeNode(io.ComfyNode):
+    """Resize an image. Same controls as UniLoad, without the loading."""
+
     @classmethod
     def define_schema(cls):
-        template = io.MatchType.Template("input_type", [io.Image, io.Mask])
         return io.Schema(
             node_id="UniResizeNode",
-            display_name="UniResize (Image/Mask)",
-            description="Resize an image or mask using various scaling methods, and output the resulting width and height.",
+            display_name="UniResize (Image)",
+            description="Resize an image using various scaling methods, and output the resulting width and height.",
             category="image/transform",
-            search_aliases=["uniresize", "resize", "resize image", "resize mask", "scale", "scale image", "scale mask", "image resize", "change size", "dimensions", "shrink", "enlarge"],
+            essentials_category="Basics",
+            search_aliases=[
+                "uniresize", "resize", "resize image", "scale", "scale image",
+                "image resize", "change size", "dimensions", "shrink", "enlarge",
+            ],
             inputs=[
-                io.MatchType.Input("input", template=template),
+                io.Image.Input("image", tooltip="Image to resize."),
                 io.DynamicCombo.Input(
                     "resize_type",
                     tooltip="Select how to resize: by exact dimensions, scale factor, matching another image, etc.",
@@ -179,7 +223,7 @@ class UniResizeNode(io.ComfyNode):
                 adhere_to_multiple_input(),
             ],
             outputs=[
-                io.MatchType.Output(template=template, display_name="resized"),
+                io.Image.Output(display_name="image"),
                 io.Int.Output(display_name="width"),
                 io.Int.Output(display_name="height"),
             ],
@@ -188,12 +232,12 @@ class UniResizeNode(io.ComfyNode):
     @classmethod
     def execute(
         cls,
-        input: io.Image.Type | io.Mask.Type,
+        image: io.Image.Type,
         scale_method: io.Combo.Type,
         adhere_to_multiple: io.Combo.Type,
         resize_type: ResizeTypedDict,
     ) -> io.NodeOutput:
-        result = apply_resize(input, resize_type, scale_method, adhere_to_multiple)
+        result = apply_resize(image, resize_type, scale_method, adhere_to_multiple)
         width, height = get_dimensions(result)
         return io.NodeOutput(result, width, height)
 
@@ -278,52 +322,43 @@ class UniLoadNode(io.ComfyNode):
 
 
 class UniRatioNode(io.ComfyNode):
-    default_selection = "sdxl:1-1"
+    """Aspect ratio + one sizing rule -> width, height.
+
+    The rules are ComfyUI's own ``ResizeType`` values, so this node offers the
+    same sizing choices as UniResize and UniLoad rather than forcing a
+    megapixel budget. The aspect ratio fills in whatever the chosen rule leaves
+    undetermined, and is ignored by the rules that pin both edges.
+    """
 
     @classmethod
     def define_schema(cls):
         return io.Schema(
             node_id="UniRatioNode",
             display_name="UniRatio (Width/Height)",
-            description="Compact, model-aware aspect ratio and resolution controller.",
+            description="Resolution source: pick an aspect ratio and a sizing rule, get width and height on a chosen grid.",
             category="image/transform",
+            essentials_category="Basics",
             search_aliases=[
                 "uniratio", "ratio", "resolution", "width height", "aspect ratio",
-                "dimensions", "sdxl resolution", "flux resolution", "video resolution",
-                "wan resolution",
+                "dimensions", "megapixels", "empty latent size",
             ],
             inputs=[
                 io.Combo.Input(
-                    "selection",
-                    options=selection_ids(),
-                    default=cls.default_selection,
-                    tooltip="Choose a model profile and aspect ratio. The compact browser is supplied by UniResize's frontend extension.",
+                    "aspect_ratio",
+                    options=RATIO_NAMES,
+                    default="16:9",
+                    tooltip="Target shape. Portrait variants are listed separately, so no orientation switch is needed. Ignored by 'scale dimensions', 'match size' and 'scale by multiplier'.",
                 ),
-                io.Float.Input(
-                    "upscale",
-                    default=1.0,
-                    min=0.01,
-                    max=8.0,
-                    step=0.01,
-                    tooltip="Multiply the selected or manual resolution. Model presets remain aligned to their required spatial multiple.",
+                io.DynamicCombo.Input(
+                    "size_by",
+                    tooltip="How to fix the size: total pixels, one edge, both edges, or another image's size.",
+                    options=size_by_options(),
                 ),
-                io.Int.Input(
-                    "manual_width",
-                    default=1024,
-                    min=1,
-                    max=MAX_RESOLUTION,
-                    step=1,
-                    advanced=True,
-                    tooltip="Manual base width. Normally edited through the compact resolution browser.",
-                ),
-                io.Int.Input(
-                    "manual_height",
-                    default=1024,
-                    min=1,
-                    max=MAX_RESOLUTION,
-                    step=1,
-                    advanced=True,
-                    tooltip="Manual base height. Normally edited through the compact resolution browser.",
+                io.Combo.Input(
+                    "multiple",
+                    options=MULTIPLES,
+                    default="32",
+                    tooltip="Both edges land on this grid. 8 suits SD/SDXL latents, 32 suits most video models. 'disabled' returns exact pixels.",
                 ),
             ],
             outputs=[
@@ -335,10 +370,27 @@ class UniRatioNode(io.ComfyNode):
     @classmethod
     def execute(
         cls,
-        selection: io.Combo.Type,
-        upscale: io.Float.Type,
-        manual_width: io.Int.Type,
-        manual_height: io.Int.Type,
+        aspect_ratio: io.Combo.Type,
+        multiple: io.Combo.Type,
+        size_by: dict,
     ) -> io.NodeOutput:
-        width, height = resolve_dimensions(selection, upscale, manual_width, manual_height)
+        mode = size_by["size_by"]
+        reference = None
+        if mode in EXPLICIT_MODES and "match" in size_by:
+            match = size_by.get("match")
+            if match is not None:
+                reference = get_dimensions(match)
+
+        width, height = solve(
+            mode,
+            aspect_ratio,
+            1 if multiple == "disabled" else int(multiple),
+            megapixels=size_by.get("megapixels", 1.0),
+            longer_size=size_by.get("longer_size", 1024),
+            shorter_size=size_by.get("shorter_size", 768),
+            width=size_by.get("width", 1024),
+            height=size_by.get("height", 1024),
+            multiplier=size_by.get("multiplier", 1.0),
+            reference=reference,
+        )
         return io.NodeOutput(width, height)
