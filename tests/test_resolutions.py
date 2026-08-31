@@ -6,15 +6,14 @@ import unittest
 
 PACKAGE_ROOT = pathlib.Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
-    "comfyui_uniresize_tests",
-    PACKAGE_ROOT / "__init__.py",
-    submodule_search_locations=[str(PACKAGE_ROOT)],
+    "comfyui_uniresize_resolutions",
+    PACKAGE_ROOT / "resolutions.py",
 )
-PACKAGE = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = PACKAGE
-SPEC.loader.exec_module(PACKAGE)
+MODULE = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = MODULE
+SPEC.loader.exec_module(MODULE)
 
-from comfyui_uniresize_tests.resolutions import (  # noqa: E402
+from comfyui_uniresize_resolutions import (  # noqa: E402
     ASPECT_RATIOS,
     EXPLICIT_MODES,
     MULTIPLES,
@@ -123,7 +122,16 @@ class AreaTests(unittest.TestCase):
         self.assertEqual(width, height)
 
     def test_portrait_is_the_transpose_of_landscape(self):
-        for landscape, portrait in (("16:9", "9:16"), ("4:3", "3:4"), ("3:2", "2:3")):
+        for landscape, portrait in (
+            ("16:9", "9:16"),
+            ("4:3", "3:4"),
+            ("3:2", "2:3"),
+            ("5:4", "4:5"),
+            ("16:10", "10:16"),
+            ("2:1", "1:2"),
+            ("21:9", "9:21"),
+            ("3:1", "1:3"),
+        ):
             with self.subTest(pair=(landscape, portrait)):
                 self.assertEqual(
                     solve("scale total pixels", landscape, 32, megapixels=1.0),

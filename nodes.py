@@ -1,7 +1,7 @@
 import os
 
 import torch
-from typing import TypedDict, Literal
+from typing import Literal, NotRequired, TypedDict
 
 import folder_paths
 from comfy_api.latest import io
@@ -31,26 +31,34 @@ RESIZE_DISABLED = "disabled"
 
 
 class ResizeTypedDict(TypedDict):
-    resize_type: ResizeType
+    resize_type: ResizeType | Literal["disabled"]
     scale_method: Literal["nearest-exact", "bilinear", "area", "bicubic", "lanczos"]
-    crop: Literal["disabled", "center"]
-    multiplier: float
-    width: int
-    height: int
-    longer_size: int
-    shorter_size: int
-    megapixels: float
-    multiple: int
+    crop: NotRequired[Literal["disabled", "center"]]
+    multiplier: NotRequired[float]
+    width: NotRequired[int]
+    height: NotRequired[int]
+    longer_size: NotRequired[int]
+    shorter_size: NotRequired[int]
+    megapixels: NotRequired[float]
+    multiple: NotRequired[int]
+    match: NotRequired[torch.Tensor]
 
 
-def resize_options(include_disabled: bool = False, include_match: bool = True) -> list[io.DynamicCombo.Option]:
-    """Build the shared resize_type option set. The first option is what the widget defaults to."""
-    crop_combo = io.Combo.Input(
+def _crop_input() -> io.Combo.Input:
+    return io.Combo.Input(
         "crop",
         options=CROP_METHODS,
         default="center",
         tooltip="How to handle aspect ratio mismatch: 'disabled' stretches to fit, 'center' crops to maintain aspect ratio.",
     )
+
+
+def _match_input(tooltip: str) -> io.MultiType.Input:
+    return io.MultiType.Input("match", [io.Image, io.Mask], tooltip=tooltip)
+
+
+def resize_options(include_disabled: bool = False, include_match: bool = True) -> list[io.DynamicCombo.Option]:
+    """Build the shared resize_type option set. The first option is what the widget defaults to."""
     options = []
     if include_disabled:
         options.append(io.DynamicCombo.Option(RESIZE_DISABLED, []))
@@ -58,7 +66,7 @@ def resize_options(include_disabled: bool = False, include_match: bool = True) -
         io.DynamicCombo.Option(ResizeType.SCALE_DIMENSIONS, [
             io.Int.Input("width", default=1024, min=0, max=MAX_RESOLUTION, step=1, tooltip="Target width in pixels. Set to 0 to auto-calculate from height while preserving aspect ratio."),
             io.Int.Input("height", default=1024, min=0, max=MAX_RESOLUTION, step=1, tooltip="Target height in pixels. Set to 0 to auto-calculate from width while preserving aspect ratio."),
-            crop_combo,
+            _crop_input(),
         ]),
         io.DynamicCombo.Option(ResizeType.SCALE_BY, [
             io.Float.Input("multiplier", default=1.00, min=0.01, max=8.0, step=0.01, tooltip="Scale factor (e.g., 2.0 doubles size, 0.5 halves size)."),
@@ -81,8 +89,8 @@ def resize_options(include_disabled: bool = False, include_match: bool = True) -
     ])
     if include_match:
         options.append(io.DynamicCombo.Option(ResizeType.MATCH_SIZE, [
-            io.MultiType.Input("match", [io.Image, io.Mask], tooltip="Resize input to match the dimensions of this reference image or mask."),
-            crop_combo,
+            _match_input("Resize input to match the dimensions of this reference image or mask."),
+            _crop_input(),
         ]))
     options.append(io.DynamicCombo.Option(ResizeType.SCALE_TO_MULTIPLE, [
         io.Int.Input("multiple", default=32, min=1, max=MAX_RESOLUTION, step=1, tooltip="Resize so width and height are divisible by this number. Useful for latent alignment (e.g., 8 or 64)."),
@@ -97,10 +105,7 @@ def size_by_options() -> list[io.DynamicCombo.Option]:
     UniResize and UniLoad. ``scale to multiple`` is absent because it is the
     always-on ``multiple`` widget here rather than a way to choose a size.
     """
-    match_input = io.MultiType.Input(
-        "match", [io.Image, io.Mask],
-        tooltip="Reference to take dimensions from. Aspect ratio is ignored.",
-    )
+    match_tooltip = "Reference to take dimensions from. Aspect ratio is ignored."
     return [
         io.DynamicCombo.Option(ResizeType.SCALE_TOTAL_PIXELS, [
             io.Float.Input("megapixels", default=1.0, min=0.01, max=16.0, step=0.01, tooltip="Total pixel budget. 1.0 is roughly 1024x1024; 0.26 is roughly 512x512."),
@@ -121,9 +126,9 @@ def size_by_options() -> list[io.DynamicCombo.Option]:
             io.Int.Input("width", default=1344, min=1, max=MAX_RESOLUTION, step=1, tooltip="Exact width. Aspect ratio is ignored."),
             io.Int.Input("height", default=768, min=1, max=MAX_RESOLUTION, step=1, tooltip="Exact height. Aspect ratio is ignored."),
         ]),
-        io.DynamicCombo.Option(ResizeType.MATCH_SIZE, [match_input]),
+        io.DynamicCombo.Option(ResizeType.MATCH_SIZE, [_match_input(match_tooltip)]),
         io.DynamicCombo.Option(ResizeType.SCALE_BY, [
-            match_input,
+            _match_input(match_tooltip),
             io.Float.Input("multiplier", default=1.0, min=0.01, max=8.0, step=0.01, tooltip="Scale factor applied to the reference's size."),
         ]),
     ]
@@ -183,7 +188,13 @@ def apply_resize(
         raise ValueError(f"Unsupported resize type: {selected_type}")
 
     if adhere_to_multiple != "disabled":
-        result = scale_to_multiple_cover(result, int(adhere_to_multiple), scale_method)
+        grid = int(adhere_to_multiple)
+        already_aligned = (
+            selected_type == ResizeType.SCALE_TO_MULTIPLE
+            and int(resize_type.get("multiple", -1)) == grid
+        )
+        if not already_aligned:
+            result = scale_to_multiple_cover(result, grid, scale_method)
 
     return result
 
@@ -314,7 +325,7 @@ class UniLoadNode(io.ComfyNode):
 
     @classmethod
     def fingerprint_inputs(cls, image, **kwargs):
-        return LoadImage.IS_CHANGED(image)
+        return (LoadImage.IS_CHANGED(image), kwargs)
 
     @classmethod
     def validate_inputs(cls, image, **kwargs):

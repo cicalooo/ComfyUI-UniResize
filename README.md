@@ -53,7 +53,7 @@ in.
 
 | Widget | Meaning |
 |---|---|
-| `aspect_ratio` | `1:1`, `4:3`, `3:4`, `3:2`, `2:3`, `16:9`, `9:16`, `21:9`, `9:21` |
+| `aspect_ratio` | `1:1`, `5:4`/`4:5`, `4:3`/`3:4`, `3:2`/`2:3`, `16:10`/`10:16`, `16:9`/`9:16`, `2:1`/`1:2`, `21:9`/`9:21`, `32:9`/`9:32`, `3:1`/`1:3` |
 | `size_by` | which rule fixes the size (below) |
 | `multiple` | grid both edges land on: 8, 16, 32, 64, or `disabled` for exact pixels |
 
@@ -75,6 +75,9 @@ in UniResize and UniLoad:
 
 `scale to multiple` is not in this list because here it is the always-on
 `multiple` widget rather than a way to choose a size.
+
+On UniLoad/UniResize, `adhere_to_multiple` is a second pass. If `resize_type`
+is already `scale to multiple` with the same grid, that second pass is skipped.
 
 **Edge-pinned rules keep your number.** `scale width 1344` at `16:9` gives
 exactly 1344×768. Only `scale total pixels` trades both edges off against each

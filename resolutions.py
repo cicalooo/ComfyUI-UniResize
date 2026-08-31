@@ -1,31 +1,34 @@
-"""Aspect ratio + a sizing rule -> width/height.
-
-The sizing vocabulary is ComfyUI's own ``ResizeType`` from
-``comfy_extras/nodes_post_processing.py``, so UniRatio offers the same choices
-as UniResize and UniLoad: pin the total pixels, the longer edge, the shorter
-edge, one axis, both axes, or another image's size. Megapixels is one option
-among those, not the only way in.
-
-The difference is that UniRatio has no image to measure, so the aspect ratio
-supplies whatever the chosen rule leaves undetermined.
-"""
+"""Aspect ratio + one ResizeType rule -> grid-aligned width/height."""
 
 from __future__ import annotations
 
 import math
 
-from nodes import MAX_RESOLUTION
+try:
+    from nodes import MAX_RESOLUTION
+except ImportError:
+    MAX_RESOLUTION = 16384
 
 ASPECT_RATIOS = {
     "1:1": (1, 1),
+    "5:4": (5, 4),
+    "4:5": (4, 5),
     "4:3": (4, 3),
     "3:4": (3, 4),
     "3:2": (3, 2),
     "2:3": (2, 3),
+    "16:10": (16, 10),
+    "10:16": (10, 16),
     "16:9": (16, 9),
     "9:16": (9, 16),
+    "2:1": (2, 1),
+    "1:2": (1, 2),
     "21:9": (21, 9),
     "9:21": (9, 21),
+    "32:9": (32, 9),
+    "9:32": (9, 32),
+    "3:1": (3, 1),
+    "1:3": (1, 3),
 }
 
 RATIO_NAMES = list(ASPECT_RATIOS)
@@ -53,12 +56,7 @@ def _snap(value: float, multiple: int) -> int:
 
 
 def _best_area_fit(ratio: float, area: float, multiple: int) -> tuple[int, int]:
-    """Grid-aligned pair closest to both the target area and the target ratio.
-
-    Rounding each edge independently lets one direction dominate on narrow or
-    cinematic formats, so the neighbourhood around the naive pair is scored on
-    combined area and aspect error.
-    """
+    """Independent rounding of each edge skews cinematic ratios; score the neighbourhood."""
     base_width = _snap(math.sqrt(area * ratio), multiple)
     base_height = _snap(math.sqrt(area / ratio), multiple)
     step = max(1, multiple)
@@ -107,13 +105,7 @@ def solve(
     multiplier: float = 1.0,
     reference: tuple[int, int] | None = None,
 ) -> tuple[int, int]:
-    """Resolve one sizing rule to a concrete, grid-aligned width/height.
-
-    Edge-pinned rules keep the number you asked for: the pinned edge is snapped
-    to the grid and the other edge is derived from the ratio. Only
-    ``scale total pixels`` trades both edges off against each other, because
-    only there is the target a product rather than a length.
-    """
+    """Pinned edges stay snapped; only ``scale total pixels`` trades both edges."""
     if mode in EXPLICIT_MODES:
         if mode == "scale dimensions":
             target_w, target_h = float(width), float(height)
